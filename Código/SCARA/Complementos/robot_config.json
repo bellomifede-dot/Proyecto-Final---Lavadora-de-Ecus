@@ -1,0 +1,38 @@
+{
+    "axes": {
+        "J1": {
+            "type": "rotational",
+            "steps_per_rev": 200,
+            "gear_ratio": 16,
+            "steps_per_unit": 8.888888888888888888888888888888,
+            "limits": {"min": -150, "max": 150},
+            "units": "deg"
+        },
+        "J2": {
+            "type": "rotational",
+            "steps_per_rev": 200,
+            "gear_ratio": 16,
+            "steps_per_unit": 8.888888888888888888888888888888,
+            "limits": {"min": -120, "max": 120},
+            "units": "deg"
+        },
+        "Z": {
+            "type": "linear",
+            "steps_per_rev": 200,
+            "gear_ratio": 5,
+            "pitch": 2.0,
+            "teeth": 50,
+            "steps_per_unit": 10.0,
+            "limits": {"min": 0, "max": 150},
+            "units": "mm"
+        },
+        "J6": {
+            "type": "rotational",
+            "steps_per_rev": 200,
+            "gear_ratio": 5,
+            "steps_per_unit": 2.77777777,
+            "limits": {"min": -180, "max": 180},
+            "units": "deg"
+        }
+    }
+}
