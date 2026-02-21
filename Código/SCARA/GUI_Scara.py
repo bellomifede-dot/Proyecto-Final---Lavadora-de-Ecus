@@ -1,0 +1,1093 @@
+# interfaz_robot_real.py
+import time
+import threading
+import serial
+import serial.tools.list_ports
+import customtkinter as ctk
+import tkinter as tk
+from tkinter import messagebox
+import os
+import json
+import pygame
+import re
+import socket
+# Importar módulos usuarios (asegurate están en la misma carpeta)
+import motion_model
+import scara_kinematics
+from motion_model import RobotConfig, MotionModel
+import numpy as np
+
+# --------------------------
+# Config
+# --------------------------
+BAUDRATE = 115200
+TIMEOUT = 0.2
+POINTS_FILE = "puntos_guardados.json"
+
+import math   # añadir si no está en los imports
+
+def normalize_and_invert_yaw(yaw_deg):
+    """
+    Normaliza e invierte el yaw para la convención de tu robot.
+
+    Reglas:
+      - Entrada: yaw en grados (puede ser cualquier real; p. ej. 315, 90, 210, -45).
+      - Se normaliza a [0, 360).
+      - Si yaw > 180 -> se reemplaza por yaw - 360 (contraparte negativa).
+      - Finalmente se invierte el signo (porque el robot usa la convención opuesta).
+      - Resultado garantizado en rango [-180, 180].
+    Ejemplos:
+      90   ->  -90
+      210  ->  150   (210 -> -150 -> invertir -> 150)
+      315  ->   45   (315 -> -45  -> invertir -> 45)
+      -45  ->   45   (-45 -> 315 -> -45 -> invertir -> 45)   # obs: cámara normalmente entrega 315 ya.
+    """
+    # normalizar a [0,360)
+    yaw = float(yaw_deg) % 360.0
+
+    # si mayor a 180 -> llevar a equivalente negativo en (-180, 180]
+    if yaw > 180.0:
+        yaw = yaw - 360.0
+
+    # invertir signo (convencción robot)
+    result = yaw
+
+    # forzar en [-180, 180]
+    if result > 180.0:
+        result -= 360.0
+    if result < -180.0:
+        result += 360.0
+
+    return float(result)
+
+def parse_float_from_labelz(label_text):
+        """Extrae el primer número válido de un texto como 'Z: 0 p | 0.00'."""
+        match = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", label_text)
+        return float(match[0]) if match else 0.0
+
+def parse_float_from_label(label_text):
+        """Extrae el primer número válido de un texto como 'Z: 0 p | 0.00'."""
+        match = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", label_text)
+        return float(match[-1]) if match else 0.0
+    
+def parse_float_from_label2(label_text):
+        """Extrae el primer número válido de un texto como 'Z: 0 p | 0.00'."""
+        match = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", label_text)
+        return float(match[1]) if match else 0.0
+
+def obtener_coordenadas(host="127.0.0.1", port=5000, timeout=60):
+    """📡 Obtiene la pose desde el servidor TCP."""
+    try:
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        client.connect((host, port))
+        client.sendall(b"GET")
+        data = client.recv(2048).decode().strip()
+        # pedir cierre de sesión
+        client.sendall(b"EXIT")
+        client.close()
+
+        if not data:
+            print("DEBUG cliente: no data recibida")
+            return None
+
+        print("DEBUG cliente: raw response:", data)
+        pose = json.loads(data)
+        pose = {k.lower(): v for k, v in pose.items()}
+
+        if "error" in pose:
+            print("DEBUG cliente: server error:", pose["error"])
+            return None
+
+        return pose
+
+    except Exception as e:
+        print("DEBUG cliente exception:", e)
+        return None
+
+
+
+
+# Matriz de transformación homogénea [4x4]
+# [R | t]
+# [0 0 0 1]
+T_CAM_TO_ROBOT = np.array([
+    [1, 0, 0, 492.5],   
+    [0, 1, 0, -3],  
+    [0, 0, 1, 0],   
+    [0, 0, 0, 1]
+])
+def transformar_a_robot(x, y, z, T=T_CAM_TO_ROBOT):
+    """Aplica la matriz homogénea T_CAM_TO_ROBOT al punto (x, y, z)."""
+    punto_cam = np.array([x, y, z, 1]).reshape(4, 1)
+    punto_robot = T @ punto_cam
+    Xr, Yr, Zr = punto_robot[:3, 0]
+    return float(Xr), float(Yr), float(Zr)
+
+
+
+# --------------------------
+# Clase de interfaz serial
+# --------------------------
+class RobotSerialInterface:
+    def __init__(self):
+        self.ser = None
+        self.port = None
+        self.alive = False
+        self.listener_thread = None
+
+    def detect_port(self):
+        ports = list(serial.tools.list_ports.comports())
+        for p in ports:
+            desc = (p.description or "").lower()
+            hwid = (p.hwid or "").lower()
+            # filtros típicos
+            if any(k in desc for k in ["arduino", "ch340", "usb serial", "uno", "mega", "nano", "leonardo"]) \
+               or "ch340" in hwid or "usb vid" in hwid:
+                return p.device
+        return None
+
+    def connect(self, explicit_port=None):
+        port = explicit_port or self.detect_port()
+        if not port:
+            raise RuntimeError("No se detectó puerto Arduino. Conectar y reintentar.")
+        self.port = port
+        self.ser = serial.Serial(port, BAUDRATE, timeout=TIMEOUT)
+        time.sleep(1.5)
+        self.alive = True
+        # iniciar listener
+        self.listener_thread = threading.Thread(target=self._listener, daemon=True)
+        self.listener_thread.start()
+        return True
+
+    def close(self):
+        self.alive = False
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
+
+    def send(self, text):
+        if not self.ser or not self.ser.is_open:
+            raise RuntimeError("Puerto serial no conectado")
+        self.ser.write((text + "\n").encode())
+        # no hacemos blocking esperando OK; la GUI leerá respuestas por el listener
+        return
+
+    def _listener(self):
+        while self.alive and self.ser:
+            try:
+                if self.ser.in_waiting:
+                    line = self.ser.readline().decode(errors="ignore").strip()
+                    if line:
+                        # publicar en la GUI mediante callback (si asignado)
+                        if GUI.singleton:
+                            GUI.singleton.append_log(f"Arduino: {line}")
+            except Exception:
+                pass
+            time.sleep(0.02)
+
+# --------------------------
+# Manejo de puntos guardados
+# --------------------------
+class PointManager:
+    def __init__(self, filename=POINTS_FILE):
+        self.filename = filename
+        self.points = self.load_points()
+
+    def load_points(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def save_points(self):
+        try:
+            with open(self.filename, "w") as f:
+                json.dump(self.points, f, indent=2)
+        except Exception as e:
+            print("Error guardando puntos:", e)
+
+    def add_point(self, name, x, y, z, phi_abs):
+        self.points[name] = {
+            "x": float(x),
+            "y": float(y),
+            "z": float(z),
+            "phi_abs": float(phi_abs)
+        }
+        self.save_points()
+        
+    def get_points(self):
+        return self.points
+
+    def get_point(self, name):
+        return self.points.get(name)
+
+    def delete_point(self, name):
+        if name in self.points:
+            del self.points[name]
+            self.save_points()
+
+# --------------------------
+# GUI
+# --------------------------
+class GUI:
+    singleton = None  # para que el serial listener pueda acceder
+
+    def __init__(self, root):
+        GUI.singleton = self
+        self.root = root
+        self.root.title("Interfaz Robot Real - SCARA")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        self.serial = RobotSerialInterface()
+        self.unit_mode = tk.StringVar(value="human")  # "human" (deg/mm) or "steps"
+        self.point_manager = PointManager()
+        self._build_ui()
+        self.update_status_loop()
+        self.robot_config = RobotConfig("robot_config.json")
+        self.motion = MotionModel(self.robot_config)
+
+
+    def _build_ui(self):
+        # Layout: similar a tu mockup: left column connection/status, right big controls
+        self.root.geometry("1100x700")
+        self.root.grid_columnconfigure(1, weight=1)
+        left_container = ctk.CTkFrame(self.root, width=300)
+        left_container.grid(row=0, column=0, sticky="nsw", padx=10, pady=10)
+        left = left_container  # mantener compatibilidad
+        right = ctk.CTkFrame(self.root)
+        right.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_columnconfigure(1, weight=2)
+
+
+        ctk.CTkLabel(left, text="Selector Unidades:", anchor="w").pack(padx=10, pady=(10,0))
+        self.unit_switch = ctk.CTkSegmentedButton(left, values=["Pasos","Grados/mm"], command=self.unit_changed)
+        self.unit_switch.set("Grados/mm")
+        self.unit_switch.pack(padx=10, pady=5, fill="x")
+
+        # status positions
+        ctk.CTkLabel(left, text="Pos Art (p / mm):", anchor="w").pack(padx=10, pady=(10,0))
+        self.j1_var = tk.StringVar(value="J1: --")
+        self.j2_var = tk.StringVar(value="J2: --")
+        self.z_var  = tk.StringVar(value="Z: --")
+        self.j6_var = tk.StringVar(value="J6: --")
+        for v in (self.j1_var, self.j2_var, self.z_var, self.j6_var):
+            ctk.CTkLabel(left, textvariable=v, anchor="w").pack(padx=15)
+
+        ctk.CTkLabel(left, text="Pos Cartesianas:", anchor="w").pack(padx=10, pady=(10,0))
+        self.x_var = tk.StringVar(value="X: --")
+        self.y_var = tk.StringVar(value="Y: --")
+        self.z_cart_var = tk.StringVar(value="Z: --")
+        self.phi_var = tk.StringVar(value="φ_abs: --")
+        ctk.CTkLabel(left, textvariable=self.x_var).pack(padx=15)
+        ctk.CTkLabel(left, textvariable=self.y_var).pack(padx=15)
+        ctk.CTkLabel(left, textvariable=self.z_cart_var).pack(padx=15)
+        ctk.CTkLabel(left, textvariable=self.phi_var).pack(padx=15)    
+        # --------------------------
+        # Gestión de Puntos Guardados
+        # --------------------------
+        ctk.CTkLabel(left, text="Gestión de Puntos", font=("Segoe UI", 12, "bold")).pack(pady=(5,0))
+
+        self.point_name_entry = ctk.CTkEntry(left, placeholder_text="Nombre del punto")
+        self.point_name_entry.pack(fill="x", padx=10, pady=5)
+
+        btn_frame = ctk.CTkFrame(left)
+        btn_frame.pack(fill="x", padx=10, pady=(0,5))
+        ctk.CTkButton(btn_frame, text="Guardar punto actual", command=self.save_point_button).pack(side="left", expand=True, padx=3)
+        ctk.CTkButton(btn_frame, text="Cargar puntos", command=self.refresh_points_list).pack(side="left", expand=True, padx=3)
+        ctk.CTkButton(btn_frame, text="Obtener ECU", fg_color="#3A7EBF", command=lambda: threading.Thread(target=self.obtener_ecu_y_guardar, daemon=True).start()).pack(side="left", expand=True, padx=3)
+
+        self.points_list = tk.Listbox(left, height=12)
+        self.points_list.pack(fill="both", padx=10, pady=5)
+        
+        btn_action = ctk.CTkFrame(left)
+        btn_action.pack(fill="x", padx=10, pady=(0,10))
+        ctk.CTkButton(btn_action, text="Mover a punto seleccionado", fg_color="#107C41", command=self.go_to_point).pack(side="left", expand=True, padx=3)
+        ctk.CTkButton(btn_action, text="Borrar punto", fg_color="#D33E2A", command=self.delete_point_button).pack(side="left", expand=True, padx=3)
+
+        # --- Right: Controls ---
+        # Crear un contenedor horizontal que contenga ambos paneles
+        right_combined = ctk.CTkFrame(right)
+        right_combined.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # --------- Panel de Jogging Manual (izquierda) ---------
+        jog_frame = ctk.CTkFrame(right_combined)
+        jog_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+        ctk.CTkLabel(jog_frame, text="Jogging Manual", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=6, pady=(5,10))
+        ctk.CTkLabel(jog_frame, text="P").grid(row=2, column=0, padx=5, sticky="w")
+        self.jog_value = ctk.CTkEntry(jog_frame, placeholder_text="steps/deg/mm", width=60)
+        self.jog_value.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        ctk.CTkLabel(jog_frame, text="V").grid(row=2, column=3, padx=5, sticky="w")
+        self.jog_vmax = ctk.CTkEntry(jog_frame, placeholder_text="V general", width=60)
+        self.jog_vmax.grid(row=2, column=4, padx=5, pady=5, sticky="ew")
+        ctk.CTkLabel(jog_frame, text="A").grid(row=2, column=5, padx=5, sticky="w")
+        self.jog_amax = ctk.CTkEntry(jog_frame, placeholder_text="A general", width=60)
+        self.jog_amax.grid(row=2, column=6, padx=5, pady=5, sticky="ew")
+
+        # Botones de jogging
+        axes = ["J1", "J2", "Z", "J6"]
+        for i, axis in enumerate(axes):
+            ctk.CTkLabel(jog_frame, text=f"{axis}:").grid(row=3+i, column=0, padx=5, sticky="e")
+            btn_m = ctk.CTkButton(jog_frame, text="-", width=40, command=lambda a=axis: self.jog_axis(a, -1))
+            btn_p = ctk.CTkButton(jog_frame, text="+", width=40, command=lambda a=axis: self.jog_axis(a, +1))
+            btn_m.grid(row=3+i, column=1, padx=2)
+            btn_p.grid(row=3+i, column=2, padx=2)
+            ctk.CTkLabel(jog_frame, text=f"V{axis}:").grid(row=3+i, column=3)
+            setattr(self, f"{axis}_vmax", ctk.CTkEntry(jog_frame, placeholder_text="v", width=60))
+            getattr(self, f"{axis}_vmax").grid(row=3+i, column=4)
+            ctk.CTkLabel(jog_frame, text=f"A{axis}:").grid(row=3+i, column=5)
+            setattr(self, f"{axis}_amax", ctk.CTkEntry(jog_frame, placeholder_text="a", width=60))
+            getattr(self, f"{axis}_amax").grid(row=3+i, column=6)
+
+        # --------- Panel de Conexión y Control (derecha) ---------
+        control_frame = ctk.CTkFrame(right_combined)
+        control_frame.pack(side="left", fill="y", padx=10, pady=10)
+
+        ctk.CTkLabel(control_frame, text="Conexión y Control", font=("Segoe UI", 16, "bold")).pack(pady=(10,5))
+        self.port_entry = ctk.CTkEntry(control_frame, placeholder_text="Puerto COM (opcional)")
+        self.port_entry.pack(fill="x", padx=10, pady=5)
+        self.connect_button = ctk.CTkButton(control_frame, text="Conectar", command=self.connect_pressed)
+        self.connect_button.pack(fill="x", padx=10, pady=5)
+        self.enable_button = ctk.CTkButton(control_frame, text="Enable ON", fg_color="#107C41", command=self.toggle_enable)
+        self.enable_button.pack(fill="x", padx=10, pady=5)
+        self.home_button = ctk.CTkButton(control_frame, text="HOME", command=self.home_pressed, fg_color="orange")
+        self.home_button.pack(fill="x", padx=10, pady=5)
+        self.stop_button = ctk.CTkButton(control_frame, text="STOP", command=self.stop_pressed, fg_color="#D33E2A")
+        self.stop_button.pack(fill="x", padx=10, pady=5)
+        self.ps4_button = ctk.CTkButton(control_frame, text="Control PS4", fg_color="#4040FF", command=self.open_joystick_window)
+        self.ps4_button.pack(fill="x", padx=10, pady=5)
+        self.gripper_button = ctk.CTkButton(control_frame, text="Abrir Gripper", fg_color="#0078D7", command=self.toggle_gripper)
+        self.gripper_button.pack(fill="x", padx=10, pady=5)
+
+        control2_frame = ctk.CTkFrame(right_combined)
+        control2_frame.pack(side="left", fill="y", padx=10, pady=10)
+
+
+        self.status_label = ctk.CTkLabel(control2_frame, text="Estado: Desconectado")
+        self.status_label.pack(pady=10)
+
+        ctk.CTkLabel(control2_frame, text="Log Arduino:").pack(pady=(10,0))
+        self.log_box = tk.Text(control2_frame, height=10, width=45, bg="#1F1F1F", fg="white")
+        self.log_box.pack(fill="both", expand=True, padx=10, pady=(5,10))
+
+    
+        # --------------------------
+        # Terminal Manual
+        # --------------------------
+        terminal_frame = ctk.CTkFrame(right)
+        terminal_frame.pack(fill="x", padx=10, pady=10)
+        
+        
+        
+        ctk.CTkLabel(terminal_frame, text="Terminal Manual", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5, pady=(5,2))
+
+        term_inner = ctk.CTkFrame(terminal_frame)
+        term_inner.pack(fill="x", padx=5, pady=(0,5))
+
+        self.term_entry = ctk.CTkEntry(term_inner, placeholder_text="Ejemplo: moveJ J1 1000 800 400")
+        self.term_entry.pack(side="left", fill="x", expand=True, padx=(0,5))
+        self.term_entry.bind("<Return>", self.send_terminal_command)
+        ctk.CTkButton(term_inner, text="Enviar", fg_color="#107C41", command=self.send_terminal_command).pack(side="right")
+
+        # --------------------------
+        # Panel de Rutinas (scripts)
+        # --------------------------
+        script_frame = ctk.CTkFrame(right)
+        script_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        ctk.CTkLabel(script_frame, text="Rutinas (Script)", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5, pady=(5,2))
+
+        # Caja de texto multilinea
+        self.script_box = tk.Text(script_frame, height=12, width=70, bg="#1F1F1F", fg="white", insertbackground="white")
+        self.script_box.pack(fill="both", expand=True, padx=5, pady=(0,5))
+
+        # Botones de control
+        script_buttons = ctk.CTkFrame(script_frame)
+        script_buttons.pack(fill="x", pady=(5, 5))
+
+        ctk.CTkButton(script_buttons, text="▶ Ejecutar rutina", fg_color="#107C41", command=self.run_script_threaded).pack(side="left", padx=5)
+        ctk.CTkButton(script_buttons, text="💾 Guardar rutina", command=self.save_script_to_file).pack(side="left", padx=5)
+        ctk.CTkButton(script_buttons, text="📂 Cargar rutina", command=self.load_script_from_file).pack(side="left", padx=5)
+        ctk.CTkButton(script_buttons, text="🧹 Limpiar", fg_color="#D33E2A", command=self.clear_script_box).pack(side="left", padx=5)
+
+        # Botones loop / stop
+        ctk.CTkButton(script_buttons, text="🔁 Loop ON/OFF", fg_color="#1C7ED6", command=self.toggle_loop).pack(side="left", padx=5)
+        ctk.CTkButton(script_buttons, text="⛔ Stop", fg_color="#D33E2A", command=self.stop_script).pack(side="left", padx=5)
+     
+    # -------------------------
+    # Helper: append log Correcto
+    # -------------------------
+    def append_log(self, text):
+        self.log_box.insert("end", text + "\n")
+        self.log_box.see("end")
+
+    # -------------------------
+    # Connection actions Correcto
+    # -------------------------
+    def connect_pressed(self):
+        explicit = self.port_entry.get().strip()
+        try:
+            if explicit == "":
+                self.append_log("Intentando detectar Arduino...")
+                self.serial.connect()
+            else:
+                self.serial.connect(explicit_port=explicit)
+            self.status_label.configure(text=f"Estado: Conectado ({self.serial.port})")
+            self.append_log(f"Conectado a {self.serial.port}")
+        except Exception as e:
+            messagebox.showerror("Error conexión", str(e))
+            self.append_log(f"Error conectar: {e}")
+
+    def toggle_enable(self):
+        # reads current text to toggle
+        current = self.enable_button.cget("text")
+        if "ON" in current:
+            # send enable on
+            try:
+                self.serial.send("enable on")
+                self.enable_button.configure(text="Enable OFF", fg_color="#777777")
+            except Exception as e:
+                self.append_log(f"Error: {e}")
+        else:
+            try:
+                self.serial.send("enable off")
+                self.enable_button.configure(text="Enable ON", fg_color="#107C41")
+            except Exception as e:
+                self.append_log(f"Error: {e}")
+
+    def stop_pressed(self):
+        try:
+            self.serial.send("s")
+        except Exception as e:
+            self.append_log(f"Error: {e}")
+
+    def home_pressed(self):
+        try:
+            self.serial.send("home")
+        except Exception as e:
+            self.append_log(f"Error: {e}")
+
+    def unit_changed(self, val):
+        # switch the internal mode
+        if val == "Pasos":
+            self.unit_mode.set("steps")
+        else:
+            self.unit_mode.set("human")
+        self.append_log(f"Modo unidades: {self.unit_mode.get()}")
+
+    # -------------------------
+    # Jog Correcto
+    # -------------------------
+    def jog_axis(self, axis, direction):
+        val = self.jog_value.get().strip()
+        if val == "":
+            messagebox.showwarning("Jog", "Ingrese distancia (pasos o grados/mm).")
+            return
+        try:
+            v = float(val)
+        except Exception:
+            messagebox.showwarning("Jog", "Valor inválido")
+            return
+
+        # compute steps
+        if self.unit_mode.get() == "steps":
+            steps = int(v) * direction
+        else:
+            # human units: convert degrees/mm to steps using motion_model
+            if axis in ["J1","J2","J6"]:
+                steps = int(self.motion.units_to_steps(axis, v * direction))
+            elif axis == "Z":
+                # assume Z in mm
+                steps = int(self.motion.units_to_steps("Z", v * direction))
+            else:
+                steps = int(v * direction)
+
+        # velocity/accel: use per-axis entries if provided else jog_vmax
+        vmax = getattr(self, f"{axis}_vmax").get().strip()
+        amax = getattr(self, f"{axis}_amax").get().strip()
+        if vmax == "":
+            vmax = self.jog_vmax.get().strip() or "1000"
+        if amax == "":
+            amax = self.jog_amax.get().strip() or "3000"
+
+        cmd = f"moveJ {axis} {steps} {int(float(vmax))} {int(float(amax))}"
+        try:
+            self.serial.send(cmd)
+        except Exception as e:
+            self.append_log(str(e))
+
+    # -------------------------
+    # Status update loop (attempt to query / convert positions) Correcto
+    # -------------------------
+    def update_status_loop(self):
+        try:
+            text = self.log_box.get("1.0", "end").strip().splitlines()
+            for line in reversed(text[-30:]):
+                ln = line.lower()
+                if "pos" in ln or "j1" in ln:
+                    parts = ln.replace(":", " ").replace(",", " ").split()
+                    d = {}
+                    for i, w in enumerate(parts):
+                        if w.upper() in ["J1", "J2", "Z", "J6"]:
+                            try:
+                                d[w.upper()] = int(parts[i+1])
+                            except:
+                                pass
+                    if d:
+                        # Conversión pasos → unidades reales
+                        try:
+                            j1_p = d.get("J1", 0)
+                            j2_p = d.get("J2", 0)
+                            z_p  = d.get("Z", 0)
+                            j6_p = d.get("J6", 0)
+
+                            j1_deg = self.motion.steps_to_units("J1", j1_p)
+                            j2_deg = self.motion.steps_to_units("J2", j2_p)
+                            z_mm   = self.motion.steps_to_units("Z",  z_p)
+                            j6_deg = self.motion.steps_to_units("J6", j6_p)
+
+                            # Actualiza variables de articulaciones
+                            self.j1_var.set(f"J1: {j1_p} p | {j1_deg:.2f}°")
+                            self.j2_var.set(f"J2: {j2_p} p | {j2_deg:.2f}°")
+                            self.z_var.set( f"Z: {z_p} p | {z_mm:.2f} mm")
+                            self.j6_var.set(f"J6: {j6_p} p | {j6_deg:.2f}°")
+
+                            # Cinemática directa
+                            x, y, _, phi_abs = scara_kinematics.forward_kinematics(j1_deg, j2_deg,z_mm,j6_deg)
+
+                            self.x_var.set(f"X: {x:.2f} mm")
+                            self.y_var.set(f"Y: {y:.2f} mm")
+                            self.z_cart_var.set(f"Z: {z_mm:.2f} mm")
+                            self.phi_var.set(f"φ_abs: {phi_abs:.2f}°")
+
+                        except Exception as e:
+                            self.append_log(f"⚠ Error parsing posición: {e}")
+                        break
+        except Exception:
+            pass
+
+        self.root.after(200, self.update_status_loop)
+
+    
+    # --------------------------
+    # Gestión de puntos
+    # --------------------------
+
+    def save_point_button(self):
+        name = self.point_name_entry.get().strip()
+        if not name:
+            messagebox.showwarning("Guardar Punto", "Ingrese un nombre para el punto.")
+            return
+    
+        try:
+            # 🔹 Extraer valores usando regex robusto
+            x = parse_float_from_label(self.x_var.get())
+            y = parse_float_from_label(self.y_var.get())
+            z = parse_float_from_label(self.z_cart_var.get())
+            phi_abs = parse_float_from_label(self.phi_var.get())
+
+            # Guardar en el JSON
+            self.point_manager.add_point(name, x, y, z, phi_abs)
+            self.append_log(f"Punto guardado: {name} ({x:.2f}, {y:.2f}, {z:.2f}, φ={phi_abs:.2f})")
+            self.refresh_points_list()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar punto: {e}")
+
+    def refresh_points_list(self):
+        self.points_list.delete(0, "end")
+        pts = self.point_manager.get_points()
+        for name, coords in pts.items():
+            self.points_list.insert(
+                "end",
+                f"{name}: x={coords['x']:.2f}, y={coords['y']:.2f}, z={coords['z']:.2f}, φ={coords['phi_abs']:.2f}"
+            )
+    
+    def go_to_point(self):
+        sel = self.points_list.curselection()
+        if not sel:
+            messagebox.showwarning("Mover", "Seleccione un punto.")
+            return
+    
+        text = self.points_list.get(sel)
+        name = text.split(":")[0].strip()
+        coords = self.point_manager.get_point(name)
+        if not coords:
+            messagebox.showerror("Error", "Punto no encontrado.")
+            return
+
+        x, y, z, phi_abs = coords["x"], coords["y"], coords["z"], coords["phi_abs"]
+
+        cmd_type = "moveJ"
+        
+        try:
+            # Cinemática inversa completa
+            ik_solutions = scara_kinematics.inverse_kinematics(x, y, z,phi_abs)
+            if not ik_solutions:
+                raise ValueError("No se encontraron soluciones IK válidas")
+            ik = ik_solutions[0]  # Tomamos la primera solución válida
+        except Exception as e:
+            messagebox.showerror("Error IK", str(e))
+            return
+
+        # 🔹 Posición actual (en pasos)
+        j1_pas = parse_float_from_label2(self.j1_var.get())
+        j2_pas = parse_float_from_label2(self.j2_var.get())
+        z_pas  = parse_float_from_labelz(self.z_var.get())
+        j6_pas = parse_float_from_label2(self.j6_var.get())
+
+        # 🔹 Convertir objetivo → pasos
+        tokens = []
+        for eje, valor in {
+            "J1": ik["theta1"],
+            "J2": ik["theta2"],
+            "Z":  ik["d"],
+            "J6": ik["phi_m"]
+        }.items():
+            if eje in ["J1", "J2", "J6"]:
+                steps_target = int(self.motion.units_to_steps(eje, valor))
+            else:
+                steps_target = int(self.motion.units_to_steps("Z", valor))
+
+            steps_current = int(
+                j1_pas if eje == "J1" else
+                j2_pas if eje == "J2" else
+                z_pas if eje == "Z" else
+                j6_pas
+            )
+            
+            V = 500 
+            a = 3000 
+            delta = steps_target - steps_current
+            tokens += [eje, str(delta), str(V), str(a)]
+
+        
+        
+        
+        cmd = cmd_type + " " + " ".join(tokens)
+        try:
+            self.serial.send(cmd)
+        except Exception as e:
+            self.append_log(f"Error moviendo a {name}: {e}")
+
+
+    def delete_point_button(self):
+        sel = self.points_list.curselection()
+        if not sel:
+            messagebox.showwarning("Borrar", "Seleccione un punto para borrar.")
+            return
+        text = self.points_list.get(sel)
+        name = text.split(":")[0].strip()
+        if messagebox.askyesno("Confirmar", f"¿Borrar punto '{name}'?"):
+            self.point_manager.delete_point(name)
+            self.refresh_points_list()
+            self.append_log(f"Punto '{name}' eliminado.")
+
+    # ============================================
+    # Terminal de comandos Correto
+    # ============================================
+
+    def send_terminal_command(self, event=None):
+        cmd = self.term_entry.get().strip()
+        if cmd == "":
+            return
+        try:
+            self.serial.send(cmd)
+            self.append_log(f" Enviado: {cmd}")
+            self.term_entry.delete(0, "end")
+        except Exception as e:
+            self.append_log(f" Error enviando comando: {e}")
+
+        
+    # ==========================================================
+    # FUNCIONES DEL PANEL DE RUTINAS CON LOOP Y GOTO
+    # ==========================================================
+
+    def run_script_threaded(self):
+        """Ejecuta la rutina en un hilo separado (para no congelar la interfaz)."""
+        t = threading.Thread(target=self.run_script)
+        t.daemon = True
+        t.start()
+
+    def run_script(self):
+        """Ejecuta los comandos escritos en el panel de rutinas línea por línea."""
+        lines = self.script_box.get("1.0", "end").strip().splitlines()
+        if not lines:
+            messagebox.showinfo("Rutina", "No hay comandos para ejecutar.")
+            return
+
+        self._stop_script = False
+        self.append_log(" Iniciando ejecución de rutina...")
+
+        while True:
+            for line in lines:
+                if self._stop_script:
+                    self.append_log(" Rutina detenida por el usuario.")
+                    return
+
+                cmd = line.strip()
+                if not cmd or cmd.startswith("#"):
+                    continue  # Ignorar líneas vacías o comentarios
+
+                # --- GOTO a punto guardado ---
+                if cmd.lower().startswith("goto"):
+                    parts = cmd.split()
+                    if len(parts) < 2:
+                        self.append_log(" Sintaxis inválida en goto (use: goto nombre_punto)")
+                        continue
+
+                    point_name = parts[1]
+                    point = self.point_manager.get_point(point_name)
+                    if not point:
+                        self.append_log(f" Punto '{point_name}' no encontrado en JSON.")
+                        continue
+
+                    try:
+                        # 🔹 Obtener coordenadas guardadas (x, y, z, phi_abs)
+                        x, y, z = point["x"], point["y"], point["z"]
+                        phi_abs = point.get("phi_abs", 0.0)
+
+                        # 🔹 Cinemática inversa completa
+                        ik_solutions = scara_kinematics.inverse_kinematics(x, y, z, phi_abs)
+                        if not ik_solutions:
+                            raise ValueError("No se encontraron soluciones IK válidas")
+                        ik = ik_solutions[0]
+
+                        # 🔹 Obtener posición actual en pasos
+                        j1_pas = parse_float_from_label2(self.j1_var.get())
+                        j2_pas = parse_float_from_label2(self.j2_var.get())
+                        z_pas  = parse_float_from_labelz(self.z_var.get())
+                        j6_pas = parse_float_from_label2(self.j6_var.get())
+
+                        # 🔹 Convertir valores a pasos destino
+                        tokens = []
+                        V = 1000
+                        a = 3000
+
+                        for eje, valor in {
+                            "J1": ik["theta1"],
+                            "J2": ik["theta2"],
+                            "Z": ik["d"],
+                            "J6": ik["phi_m"]
+                        }.items():
+                            if eje in ["J1", "J2", "J6"]:
+                                steps_target = int(self.motion.units_to_steps(eje, valor))
+                            else:
+                                steps_target = int(self.motion.units_to_steps("Z", valor))
+
+                            steps_current = int(
+                                j1_pas if eje == "J1" else
+                                j2_pas if eje == "J2" else
+                                z_pas if eje == "Z" else
+                                j6_pas
+                            )
+
+                            delta = steps_target - steps_current
+                            tokens += [eje, str(delta), str(V), str(a)]
+
+                        cmd_full = "moveJ " + " ".join(tokens)
+                        self.serial.send(cmd_full)
+                        self.append_log(f" Goto {point_name} → {cmd_full}")
+
+                    except Exception as e:
+                        self.append_log(f" Error en goto {point_name}: {e}")
+
+                    time.sleep(0.2)
+                    continue
+
+
+                # --- Comando de espera ---
+                if cmd.lower().startswith("wait"):
+                    try:
+                        t = float(cmd.split()[1])
+                        self.append_log(f" Esperando {t} segundos...")
+                        self.root.update()
+                        time.sleep(t)
+                    except Exception:
+                        self.append_log(" Comando wait inválido.")
+                    continue
+                
+                # --- GET ECU desde rutina ---
+                if cmd.lower().startswith("getecu"):
+                    self.append_log("🔍 Ejecutando comando GETECU desde rutina...")
+                    threading.Thread(target=self.obtener_ecu_y_guardar, daemon=True).start()
+                    time.sleep(0.5)
+                    continue
+
+                
+
+                # --- Comandos normales ---
+                try:
+                    self.serial.send(cmd)
+                    self.append_log(f" Enviado: {cmd}")
+                    self.root.update()
+                    time.sleep(0.1)
+                except Exception as e:
+                    self.append_log(f" Error al enviar '{cmd}': {e}")
+                    break
+
+            if not getattr(self, "_loop_script", False):
+                break
+            self.append_log(" Reejecutando rutina en loop...")
+
+        self.append_log(" Rutina completada.")
+
+    def toggle_loop(self):
+        """Activa o desactiva el modo loop."""
+        self._loop_script = not getattr(self, "_loop_script", False)
+        status = "ON" if self._loop_script else "OFF"
+        self.append_log(f" Loop {status}")
+
+    def stop_script(self):
+        """Detiene la ejecución actual."""
+        self._stop_script = True
+        self._loop_script = False
+        self.append_log(" Deteniendo rutina...")
+
+    def save_script_to_file(self):
+        """Guarda el contenido del script a un archivo .txt"""
+        from tkinter import filedialog
+        content = self.script_box.get("1.0", "end").strip()
+        if not content:
+            messagebox.showinfo("Guardar rutina", "No hay contenido para guardar.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Archivos de texto", "*.txt")],
+            title="Guardar rutina como..."
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            self.append_log(f" Rutina guardada en: {file_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar el archivo: {e}")
+
+    def load_script_from_file(self):
+        """Carga una rutina desde un archivo .txt"""
+        from tkinter import filedialog
+        file_path = filedialog.askopenfilename(
+            defaultextension=".txt",
+            filetypes=[("Archivos de texto", "*.txt")],
+            title="Cargar rutina"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.script_box.delete("1.0", "end")
+            self.script_box.insert("1.0", content)
+            self.append_log(f" Rutina cargada desde: {file_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo cargar el archivo: {e}")
+
+    def clear_script_box(self):
+        """Limpia la caja de texto del script"""
+        self.script_box.delete("1.0", "end")
+        self.append_log(" Rutina limpiada.")
+
+    # ============================================
+    # Gripper Correcto
+    # ============================================
+
+    def toggle_gripper(self):
+        """Alterna entre abrir o cerrar el gripper."""
+        current = self.gripper_button.cget("text")
+        try:
+            if "Abrir" in current:
+                self.serial.send("gripper open")
+                self.gripper_button.configure(text="Cerrar Gripper", fg_color="#D33E2A")
+                self.append_log(" Gripper abierto")
+            else:
+                self.serial.send("gripper close")
+                self.gripper_button.configure(text="Abrir Gripper", fg_color="#1C7ED6")
+                self.append_log(" Gripper cerrado")
+        except Exception as e:
+            self.append_log(f" Error controlando gripper: {e}")
+
+    # ============================================
+    # Control con Joystick PS4 (pygame) Correto
+    # ============================================
+
+    def open_joystick_window(self):
+        """Abre ventana de control del joystick PS4 """
+        top = ctk.CTkToplevel(self.root)
+        top.title("Joystick PS4 - Teach Pendant")
+        top.geometry("400x350")
+
+        ctk.CTkLabel(top, text="Control PS4 conectado ", font=("Segoe UI", 16, "bold")).pack(pady=10)
+
+        self.joystick_speed = tk.StringVar(value="Velocidad: 800 pasos/s")
+        self.joystick_accel = tk.StringVar(value="Aceleración: 400 pasos/s²")
+        ctk.CTkLabel(top, textvariable=self.joystick_speed).pack(pady=5)
+        ctk.CTkLabel(top, textvariable=self.joystick_accel).pack(pady=5)
+
+        self.joystick_status = tk.StringVar(value="Esperando entrada...")
+        ctk.CTkLabel(top, textvariable=self.joystick_status, wraplength=350).pack(pady=10)
+
+        ctk.CTkButton(top, text="Desconectar", fg_color="#D33E2A",command=lambda: setattr(self, "joystick_running", False)).pack(pady=20)
+
+        # iniciar listener en otro hilo
+        self.joystick_running = True
+        threading.Thread(target=self.joystick_loop, daemon=True).start()
+
+
+    def joystick_loop(self):
+        """Lectura del joystick con pygame"""
+        pygame.init()
+        pygame.joystick.init()
+
+        if pygame.joystick.get_count() == 0:
+            self.append_log("No se detectó ningún joystick PS4 conectado.")
+            return
+
+        js = pygame.joystick.Joystick(0)
+        js.init()
+        self.append_log(f"Joystick detectado: {js.get_name()}")
+
+        vmax, amax = 800, 1000
+        gripper_open = False
+
+        self.update_joystick_status(vmax, amax)
+
+        while getattr(self, "joystick_running", False):
+            for event in pygame.event.get():
+                if event.type == pygame.JOYBUTTONDOWN:
+                    btn = event.button
+                    # Mapeo típico PS4
+                    if btn == 0:  # X
+                        self.save_point_button()
+                    elif btn == 1:  # Círculo
+                        self.serial.send("s")
+                        self.append_log(" STOP (PS4)")
+                    elif btn == 2:  # Cuadrado
+                        cmd = "gripper close" if gripper_open else "gripper open"
+                        self.serial.send(cmd)
+                        gripper_open = not gripper_open
+                        self.append_log(f" Gripper: {'cerrado' if gripper_open else 'abierto'}")
+                    elif btn == 3:  # Triángulo
+                        self.serial.send("home")
+                    elif btn == 9:  # L1
+                        self.move_axis("J1", -1, vmax, amax)
+                    elif btn == 10:  # R1
+                        self.move_axis("J1", +1, vmax, amax)
+                        
+                    elif btn == 11:  # Flecha arriba ↑
+                        vmax += 100
+                        self.append_log(f"⬆️ Velocidad + : {vmax}")
+                    elif btn == 12:  # Flecha abajo ↓
+                        vmax = max(100, vmax - 100)
+                        self.append_log(f"⬇️ Velocidad - : {vmax}")
+                    elif btn == 13:  # Flecha izquierda ←
+                        amax = max(50, amax - 50)
+                        self.append_log(f"⬅️ Aceleración - : {amax}")
+                    elif btn == 14:  # Flecha derecha →
+                        amax += 50
+                        self.append_log(f"➡️ Aceleración + : {amax}")
+
+                elif event.type == pygame.JOYAXISMOTION:
+                    # L3 
+                    if event.axis == 1:
+                        if abs(event.value) > 0.3:
+                            direction = 1 if event.value < 0 else -1
+                            self.move_axis("Z", direction, vmax, amax)
+                    # R3 
+                    elif event.axis == 2:
+                        if abs(event.value) > 0.3:
+                            direction = -1 if event.value < 0 else 1
+                            self.move_axis("J6", direction, vmax, amax)
+                    # L2 y R2 (gatillos → control de J2)
+                    elif event.axis == 4:  # L2
+                        if event.value > 0.3:  # presionado
+                            self.move_axis("J2", -1, vmax, amax)
+                    elif event.axis == 5:  # R2
+                        if event.value > 0.3:
+                            self.move_axis("J2", +1, vmax, amax)
+
+            # actualización periódica
+            self.update_joystick_status(vmax, amax)
+            time.sleep(0.05)
+
+        pygame.quit()
+        self.append_log(" Joystick desconectado.")
+
+
+    def move_axis(self, axis, direction, vmax, amax):
+        """Envía movimiento simple a un eje desde el joystick"""
+        steps = 200 * direction  # cantidad de pasos por pulso
+        cmd = f"moveJ {axis} {steps} {vmax} {amax}"
+        try:
+            self.serial.send(cmd)
+            self.append_log(f"➡️ {cmd}")
+        except Exception as e:
+            self.append_log(f" Error joystick: {e}")
+
+
+    def update_joystick_status(self, vmax, amax):
+        """Actualiza texto de estado en la ventana"""
+        self.joystick_speed.set(f"Velocidad: {vmax} pasos/s")
+        self.joystick_accel.set(f"Aceleración: {amax} pasos/s²")
+
+    # ============================================
+    # Camara
+    # ============================================
+
+    def obtener_ecu_y_guardar(self, reintentos=5, delay=60):
+        """
+        🔁 Intenta obtener la posición de la ECU desde la cámara y la guarda como 'p_ecu'.
+        Reintenta si no hay detección visible.
+        """
+        self.append_log("📷 Buscando ECU...")
+
+        for intento in range(reintentos):
+            pose = obtener_coordenadas()
+
+            if pose:
+                x_cam = float(pose.get("x", 0))
+                y_cam = float(pose.get("y", 0))
+                z_cam = float(pose.get("z", 0))
+                phi_raw = float(pose.get("yaw", 0))
+                phi_abs = normalize_and_invert_yaw(phi_raw)
+                                
+                # 🧭 Aplicar transformación a coordenadas del robot
+                x, y, z = transformar_a_robot(x_cam, y_cam, z_cam)
+
+                # Guardar o sobrescribir en JSON
+                z = 60
+                self.point_manager.add_point("p_ecu", x, y, z, phi_abs)
+                self.point_manager.save_points()
+
+                self.append_log(f"✅ ECU detectada y guardada: p_ecu ({x:.1f}, {y:.1f}, {z:.1f}, φ={phi_abs:.1f})")
+                self.refresh_points_list()
+                return
+
+            else:
+                self.append_log(f"⚠️ No se detectó ninguna ECU visible. Reintentando ({intento+1}/{reintentos})...")
+                time.sleep(delay)
+
+        self.append_log("❌ No se pudo detectar ECU tras varios intentos.")
+
+    
+
+
+
+# --------------------------
+# Main
+# --------------------------
+if __name__ == "__main__":
+    root = ctk.CTk()
+    gui = GUI(root)
+    root.mainloop()
