@@ -53,6 +53,5 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
 - Certificaciones y validaciones necesarias para uso industrial.  
 - Optimización de costos y análisis de partidas que hayan excedido estimaciones iniciales (ver sección de costos del informe original). 
 
-<video width="720" controls>
-  <source src="Videos de Rutina Completa/Rutina Completa_1.mp4" type="video/mp4">
-</video>
+[![Ver video](https://youtu.be/JoXS6hfcZ1g/hqdefault.jpg)]((https://youtu.be/JoXS6hfcZ1g))
+
