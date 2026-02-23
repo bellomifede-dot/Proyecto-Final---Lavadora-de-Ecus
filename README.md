@@ -21,7 +21,7 @@ Este proyecto desarrolla una célula automatizada capaz de localizar, manipular 
 ---
 
 ## Descripción
-El sistema consiste en una mesa de entrada donde se colocan las placas sucias, un subsistema de visión que localiza cada placa, un robot SCARA que las recoge y entrega a una caja de lavado. La caja realiza dos etapas: un rociado dirigido (para despegar suciedad superficial) y una inmersión demostrativa en una bandeja. Al finalizar, la placa se devuelve al punto de salida lista para inspección o uso. :contentReference[oaicite:2]{index=2}
+El sistema consiste en una mesa de entrada donde se colocan las placas sucias, un subsistema de visión que localiza cada placa, un robot SCARA que las recoge y entrega a una caja de lavado. La caja realiza dos etapas: un rociado dirigido (para despegar suciedad superficial) y una inmersión demostrativa en una bandeja. Al finalizar, la placa se devuelve al punto de salida lista para inspección o uso. 
 
 ## Objetivos
 - Automatizar la manipulación y limpieza de ECUs.
@@ -43,7 +43,7 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
 - **Subsistema de visión** — detección y posicionamiento.  
 - **Caja de lavado** — sistema de rociado + inmersión.  
 - **Controlador / PC maestro** — coordina visión, robot y secuencia de lavado.  
-- **ECUs** — piezas a limpiar; sensibles a humedad/solventes y por tanto se deben seguir consideraciones de seguridad. :contentReference[oaicite:3]{index=3}
+- **ECUs** — piezas a limpiar; sensibles a humedad/solventes y por tanto se deben seguir consideraciones de seguridad.
 
 ## Limitaciones y consideraciones prácticas
 - Prototipo validado en entorno de laboratorio — no listo para producción sin evaluación adicional.  
