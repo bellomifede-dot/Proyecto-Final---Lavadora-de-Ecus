@@ -4,6 +4,7 @@
 
 Este proyecto desarrolla una célula automatizada capaz de localizar, manipular y limpiar placas electrónicas (ECUs) mediante un robot SCARA y una unidad de lavado. El sistema busca reducir la intervención manual, homogeneizar el proceso y mejorar la trazabilidad de las piezas sometidas a mantenimiento o preparación previa a ensayos. 
 
+![Descripción breve](Fotos y Videos/Fotos Readme/imagen1.png)
 ---
 
 ## Tabla de contenidos
