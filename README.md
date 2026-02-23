@@ -38,7 +38,7 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
    - Inmersión demostrativa en bandeja de limpieza.  
 5. **Devolución**: la placa vuelve al puesto de salida para inspección y trazabilidad.
 
-## Componentes principales (resumen)
+## Componentes principales
 - **Robot SCARA** — para recogida y manipulación precisa.  
 - **Subsistema de visión** — detección y posicionamiento.  
 - **Caja de lavado** — sistema de rociado + inmersión.  
