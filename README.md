@@ -55,5 +55,4 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
 
 <video width="720" controls>
   <source src="Videos de Rutina Completa/Rutina Completa_1.mp4" type="video/mp4">
-  Tu navegador no soporta el elemento <code>video</code>.
 </video>
