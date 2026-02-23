@@ -1,21 +1,11 @@
-/* esp32_client_server_bridge.ino
-   Bridge TCP <-> Serial between PC and an Arduino Mega in "the box".
-
-   - Intenta STA WiFi y conecta como CLIENT TCP al PC (PC_SERVER_IP:PC_SERVER_PORT).
-   - Si falla, arranca en AP y crea un servidor TCP (LOCAL_SERVER_PORT) para que la GUI se conecte.
-   - TODO: instala ArduinoJson v6 (Library Manager).
-   - Por defecto el ESP reenvía todo lo que llega desde PC a Serial2 (MEGA) y todo lo que llega desde MEGA a la PC
-     como JSON newline-delimited: {"from_mega":"<line>"}\n
-*/
-
 #include <WiFi.h>
 #include <ArduinoJson.h>
 
 // ---------------- CONFIG ----------------
-const char* STA_SSID = "MOVISTAR-WIFI6-EC90"; // tu SSID
-const char* STA_PASS = "18200492";           // tu pass
+const char* STA_SSID = "MOVISTAR1234"; // tu SSID
+const char* STA_PASS = "44876581";           // tu pass
 
-const char* PC_SERVER_IP = "192.168.1.36";   // IP de la PC con la GUI (cliente mode)
+const char* PC_SERVER_IP = "192.168.1.87";   // IP de la PC con la GUI (cliente mode)
 const uint16_t PC_SERVER_PORT = 60000;       // puerto del server en la PC
 
 const char* AP_SSID = "ESP32-Box";
@@ -73,13 +63,25 @@ bool tryConnectToPc(const char* pc_ip, uint16_t pc_port) {
 }
 
 // Forward de una línea (sin newline) desde PC hacia MEGA (Serial2)
+// Modificación: normaliza la línea (quita CR/LF finales) y siempre envía EXACTAMENTE '\n' al final.
 void forwardPcLineToMega(const String &line) {
   if (line.length() == 0) return;
-  // Enviar tal cual a Serial2 + newline
-  Serial2.print(line);
-  if (line.charAt(line.length()-1) != '\n') Serial2.print("\n");
-  // opcional log local
-  Serial.printf("→ MEGA << %s\n", line.c_str());
+
+  // make a copy we can modify
+  String s = line;
+
+  // quitar cualquier '\r' o '\n' al final (por si acaso)
+  while (s.length() > 0 && (s.charAt(s.length()-1) == '\n' || s.charAt(s.length()-1) == '\r')) {
+    s = s.substring(0, s.length() - 1);
+  }
+
+  // Enviar siempre con un '\n' (solo LF)
+  Serial2.print(s);
+  Serial2.print("\n");
+  Serial2.flush(); // opcional: esperar que el buffer de salida se vacíe
+
+  // opcional log local (por USB)
+  Serial.printf("→ MEGA << %s\n", s.c_str());
 }
 
 // Forward de una línea desde MEGA hacia PC (envía JSON {"from_mega": "<line>"}\n)
