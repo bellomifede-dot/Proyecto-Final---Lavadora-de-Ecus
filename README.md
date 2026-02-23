@@ -54,6 +54,6 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
 - Optimización de costos y análisis de partidas que hayan excedido estimaciones iniciales (ver sección de costos del informe original). 
 
 <video width="720" controls>
-  <source src="videos/demostracion.mp4" type="video/mp4">
+  <source src="Videos de Rutina Completa/Rutina Completa_1.mp4" type="video/mp4">
   Tu navegador no soporta el elemento <code>video</code>.
 </video>
