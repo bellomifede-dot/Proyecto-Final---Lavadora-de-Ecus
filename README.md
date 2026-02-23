@@ -49,7 +49,5 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
 - Prototipo validado en entorno de laboratorio — no listo para producción sin evaluación adicional.  
 - Riesgos asociados al manejo de solventes inflamables: requiere controles de seguridad, ventilación, y normas aplicables.  
 - Certificaciones y validaciones necesarias para uso industrial.  
-- Optimización de costos y análisis de partidas que hayan excedido estimaciones iniciales (ver sección de costos del informe original). :contentReference[oaicite:4]{index=4}
+- Optimización de costos y análisis de partidas que hayan excedido estimaciones iniciales (ver sección de costos del informe original). 
 
-## Estructura sugerida del repositorio
-> (Adapta esto a los archivos reales del repo)
