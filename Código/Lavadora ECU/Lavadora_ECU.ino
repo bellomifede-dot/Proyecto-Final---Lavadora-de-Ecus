@@ -77,12 +77,22 @@ void procesarMensajeRobot(String msg) {
         enviarRobot("CLEAN_DONE");
     }
 
+    else if (msg == "POSE") {
+        Serial.println(" Robot esperando confirmación...");
+        girarServos24(170);
+    }
+
     // ===== GET_ECU =====
     else if (msg == "GET_ECU") {
         Serial.println(" Robot viene a retirar la ECU...");
         abrirGrippers();
         delay(300);
         
+    }
+
+    else if (msg == "CONTRA") {
+        Serial.println(" Robot esperando confirmación...");
+        girarServos24(0);
     }
 }
 // Lee mensajes desde Serial2
@@ -93,7 +103,12 @@ void leerRobot() {
         if (c == '\n') {
             procesarMensajeRobot(rxRobot);
             rxRobot = "";
-        } else {
+        } 
+        if (c == '\r') {
+            procesarMensajeRobot(rxRobot);
+            rxRobot = "";
+        }
+        else {
             rxRobot += c;
         }
     }
