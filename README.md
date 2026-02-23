@@ -2,7 +2,7 @@
 
 **Célula automatizada para la limpieza y manejo de Unidades de Control Electrónico (ECU)**
 
-Este proyecto desarrolla una célula automatizada capaz de localizar, manipular y limpiar placas electrónicas (ECUs) mediante un robot SCARA y una unidad de lavado. El sistema busca reducir la intervención manual, homogeneizar el proceso y mejorar la trazabilidad de las piezas sometidas a mantenimiento o preparación previa a ensayos. Basado en el brief del proyecto. :contentReference [oaicite:1]{index=1}
+Este proyecto desarrolla una célula automatizada capaz de localizar, manipular y limpiar placas electrónicas (ECUs) mediante un robot SCARA y una unidad de lavado. El sistema busca reducir la intervención manual, homogeneizar el proceso y mejorar la trazabilidad de las piezas sometidas a mantenimiento o preparación previa a ensayos. 
 
 ---
 
