@@ -7,19 +7,11 @@ Este proyecto desarrolla una célula automatizada capaz de localizar, manipular 
 <img src="Fotos y Videos/Fotos Readme/imagen1.png" alt="Placa ECU - vista" width="700" />
 
 ---
-
 ## Tabla de contenidos
 - [Descripción](#descripción)
 - [Objetivos](#objetivos)
 - [Funcionamiento general](#funcionamiento-general)
 - [Componentes principales](#componentes-principales)
-- [Limitaciones y consideraciones prácticas](#limitaciones-y-consideraciones-prácticas)
-- [Estructura sugerida del repositorio](#estructura-sugerida-del-repositorio)
-- [Instalación / Uso](#instalación--uso)
-- [Contribuir](#contribuir)
-- [Licencia](#licencia)
-- [Contacto](#contacto)
-
 ---
 
 ## Descripción
@@ -47,11 +39,11 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
 - **Controlador / PC maestro** — coordina visión, robot y secuencia de lavado.  
 - **ECUs** — piezas a limpiar; sensibles a humedad/solventes y por tanto se deben seguir consideraciones de seguridad.
 
-## Limitaciones y consideraciones prácticas
-- Prototipo validado en entorno de laboratorio — no listo para producción sin evaluación adicional.  
-- Riesgos asociados al manejo de solventes inflamables: requiere controles de seguridad, ventilación, y normas aplicables.  
-- Certificaciones y validaciones necesarias para uso industrial.  
-- Optimización de costos y análisis de partidas que hayan excedido estimaciones iniciales (ver sección de costos del informe original). 
+<p align="center">
+  <a href="https://youtu.be/JoXS6hfcZ1g" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.youtube.com/vi/JoXS6hfcZ1g/hqdefault.jpg" alt="Demo - Lavadora de ECUs" width="720" />
+  </a>
+</p>
 
-[![Ver video](https://youtu.be/JoXS6hfcZ1g/hqdefault.jpg)]((https://youtu.be/JoXS6hfcZ1g))
+<p align="center"><em>Ver demo: Lavadora de ECUs</em></p>
 
