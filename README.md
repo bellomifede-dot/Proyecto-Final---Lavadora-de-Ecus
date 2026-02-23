@@ -40,7 +40,7 @@ El sistema consiste en una mesa de entrada donde se colocan las placas sucias, u
 
 ## Componentes principales (resumen)
 - **Robot SCARA** — para recogida y manipulación precisa.  
-- **Subsistema de visión** — detección y posicionamiento (p. ej. ArUco / YOLO según necesidad).  
+- **Subsistema de visión** — detección y posicionamiento.  
 - **Caja de lavado** — sistema de rociado + inmersión.  
 - **Controlador / PC maestro** — coordina visión, robot y secuencia de lavado.  
 - **ECUs** — piezas a limpiar; sensibles a humedad/solventes y por tanto se deben seguir consideraciones de seguridad. :contentReference[oaicite:3]{index=3}
